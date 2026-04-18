@@ -1,0 +1,118 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
+from pathlib import Path
+
+import cv2
+import numpy as np
+
+from lightmocap.data.camera import CameraSet
+from lightmocap.data.io import read_json, write_json
+from lightmocap.viz.render import render_mesh_overlay
+
+
+@dataclass(frozen=True)
+class FrameOutputLayout:
+    root: Path
+    annots: Path
+    keypoints3d: Path
+    smplx: Path
+    vertices: Path
+    renders: Path
+
+
+def output_layout(root: str | Path) -> FrameOutputLayout:
+    root_path = Path(root)
+    return FrameOutputLayout(
+        root=root_path,
+        annots=root_path / "annots",
+        keypoints3d=root_path / "keypoints3d",
+        smplx=root_path / "smplx",
+        vertices=root_path / "vertices",
+        renders=root_path / "renders",
+    )
+
+
+def normalize_frame_name(frame: str | int) -> str:
+    if isinstance(frame, int):
+        return f"{frame:06d}"
+    frame = str(frame)
+    return frame.zfill(6) if frame.isdigit() and len(frame) < 6 else frame
+
+
+def build_frame_image_paths(image_root: str | Path, camera_names: list[str], frame: str | int, image_ext: str = ".jpg") -> dict[str, Path]:
+    root = Path(image_root)
+    frame_name = normalize_frame_name(frame)
+    image_paths: dict[str, Path] = {}
+    for camera_name in camera_names:
+        direct = root / camera_name / f"{frame_name}{image_ext}"
+        if direct.exists():
+            image_paths[camera_name] = direct
+            continue
+        candidates = sorted((root / camera_name).glob(f"*{image_ext}"))
+        if len(candidates) == 1:
+            image_paths[camera_name] = candidates[0]
+            continue
+        image_paths[camera_name] = direct
+    return image_paths
+
+
+def save_multiview_annotations(annotations: dict[str, dict], output_root: str | Path, frame: str | int) -> None:
+    output_root = Path(output_root)
+    frame_name = normalize_frame_name(frame)
+    for camera_name, annotation in annotations.items():
+        write_json(output_root / camera_name / f"{frame_name}.json", annotation)
+
+
+def load_multiview_annotations(annotation_root: str | Path, camera_names: list[str], frame: str | int) -> dict[str, dict]:
+    annotation_root = Path(annotation_root)
+    frame_name = normalize_frame_name(frame)
+    return {camera_name: read_json(annotation_root / camera_name / f"{frame_name}.json") for camera_name in camera_names}
+
+
+def save_frame_result(
+    output_root: str | Path,
+    frame: str | int,
+    result: dict[str, object],
+    save_vertices: bool = True,
+) -> None:
+    layout = output_layout(output_root)
+    frame_name = normalize_frame_name(frame)
+    write_json(
+        layout.keypoints3d / f"{frame_name}.json",
+        {"frame": frame_name, "keypoints3d": np.asarray(result["keypoints3d"]).tolist()},
+    )
+    write_json(
+        layout.smplx / f"{frame_name}.json",
+        {"frame": frame_name, "smplx_params": {key: np.asarray(value).tolist() for key, value in result["smplx_params"].items()}},
+    )
+    if save_vertices and result.get("vertices") is not None:
+        layout.vertices.mkdir(parents=True, exist_ok=True)
+        np.save(layout.vertices / f"{frame_name}.npy", np.asarray(result["vertices"]))
+
+
+def render_result_views(
+    output_root: str | Path,
+    frame: str | int,
+    image_paths: dict[str, Path],
+    cameras: CameraSet,
+    vertices: np.ndarray,
+    faces: np.ndarray,
+    max_views: int | None = None,
+) -> list[str]:
+    layout = output_layout(output_root)
+    frame_name = normalize_frame_name(frame)
+    layout.renders.mkdir(parents=True, exist_ok=True)
+    rendered = []
+    camera_items = list(image_paths.items())
+    if max_views is not None:
+        camera_items = camera_items[:max_views]
+    for camera_name, image_path in camera_items:
+        image = cv2.imread(str(image_path))
+        if image is None:
+            raise FileNotFoundError(image_path)
+        overlay = render_mesh_overlay(image, vertices, faces, cameras[camera_name])
+        out_path = layout.renders / f"{camera_name}_{frame_name}.jpg"
+        cv2.imwrite(str(out_path), overlay)
+        rendered.append(str(out_path))
+    return rendered

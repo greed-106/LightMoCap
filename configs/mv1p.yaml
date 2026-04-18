@@ -1,0 +1,38 @@
+# Pipeline mode.
+# `mvsp` = multiview single person, current supported path.
+# `mvmp` = multiview multi person, reserved but not implemented yet.
+mode:
+  type: mvsp
+
+# Camera calibration in the compact single-YAML format.
+cameras:
+  path: /home/ymj/code/python/EasyMocap/CoreView_377/cameras.yaml
+
+# Input image root and default output root.
+data:
+  images: /home/ymj/code/python/EasyMocap/CoreView_377
+  output: /home/ymj/code/python/EasyMocap/lightmocap/outputs
+
+# Body model selection.
+model:
+  model_path: /home/ymj/code/python/EasyMocap/models/smplx
+  gender: neutral
+  ext: npz
+  device: cuda
+
+# 2D detector frontend.
+detector:
+  type: rtmlib
+  solution: wholebody
+  mode: balanced
+  device: cuda
+  backend: onnxruntime
+
+# SMPL-X fitting schedule.
+fitting:
+  maxiters: 15
+  shape_maxiters: 5
+  enable_k2d_refine: true
+  stages:
+    - name: shape
+    - name: pose

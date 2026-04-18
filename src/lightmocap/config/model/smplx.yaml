@@ -1,0 +1,4 @@
+model_path: ../models/smplx
+gender: neutral
+ext: npz
+device: cuda

@@ -1,0 +1,21 @@
+stages:
+  - name: shape
+  - name: pose
+
+maxiters: 15
+shape_maxiters: 5
+enable_k2d_refine: true
+
+loss_weights:
+  k2d: 0.0001
+  k3d: 1.0
+  k3d_hand: 5.0
+  k3d_face: 2.0
+  reg_poses: 0.001
+  reg_hand: 0.0001
+  reg_head: 0.01
+  reg_expr: 0.01
+  reg_shapes: 0.005
+  init_poses: 0.01
+  init_shapes: 0.01
+  s3d: 1.0

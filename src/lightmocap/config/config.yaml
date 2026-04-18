@@ -1,0 +1,20 @@
+defaults:
+  - mode: mvsp
+  - model: smplx
+  - detector: rtmlib
+  - fitting: default
+
+# Camera calibration file in the compact single-YAML format.
+cameras:
+  path: ../CoreView_377/cameras.yaml
+
+# Multiview image root and default output root.
+data:
+  images: ../CoreView_377
+  output: ../outputs/lightmocap
+
+# Optional frame-range selection for future batched workflows.
+frame:
+  start: 0
+  end: -1
+  step: 1
