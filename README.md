@@ -18,30 +18,36 @@
 推荐环境：
 
 - Python `3.12`
-- `torch` / `torchvision` 需要用户自行安装与本机环境匹配的版本
+- `pyproject.toml` 已固定 `torch` 走 PyTorch 官方 `cu118` wheel 源
 - `uv` 管理环境和依赖
 
-`LightMocap` 不在 `pyproject.toml` 中绑定 `torch` 版本，也不绑定固定 CUDA wheel。
-这是为了避免在分发时把某个 CUDA 版本强加给所有用户。
+当前项目已经在 `pyproject.toml` 中写入 `torch`，并通过 `uv` 的 package source
+把它绑定到 PyTorch 官方 `cu118` index：
+
+```toml
+[tool.uv.sources]
+torch = { index = "pytorch-cu118" }
+
+[[tool.uv.index]]
+name = "pytorch-cu118"
+url = "https://download.pytorch.org/whl/cu118"
+explicit = true
+```
 
 推荐安装顺序：
 
 ```bash
-cd /home/ymj/code/python/EasyMocap/lightmocap
+cd /home/ymj/code/python/LightMoCap
 uv venv .venv --python 3.12
 
-# 1. 先安装适合自己环境的 PyTorch
-# 下面只是 CUDA 11.8 的示例，其他 CUDA 版本或 CPU 环境请替换成对应官方命令
-uv pip install torch torchvision --index-url https://download.pytorch.org/whl/cu118
-
-# 2. 再安装 LightMocap 其余依赖
+# `torch` 会自动从 PyTorch 官方 cu118 源解析，其余包仍可走镜像源
 UV_INDEX_URL="https://pypi.tuna.tsinghua.edu.cn/simple" uv sync --extra dev --extra detection
 ```
 
-如果你已经提前装好了合适版本的 `torch` / `torchvision`，只需要执行：
+如果不需要开发和检测相关额外依赖，可以直接执行：
 
 ```bash
-UV_INDEX_URL="https://pypi.tuna.tsinghua.edu.cn/simple" uv sync --extra dev --extra detection
+UV_INDEX_URL="https://pypi.tuna.tsinghua.edu.cn/simple" uv sync
 ```
 
 ## 输入数据格式
