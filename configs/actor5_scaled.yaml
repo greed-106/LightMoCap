@@ -6,17 +6,17 @@ mode:
 
 # Camera calibration in the compact single-YAML format.
 cameras:
-  path: /home/ymj/code/python/EasyMocap/actor5/cameras.yaml
+  path: /home/ymj/code/python/LightMoCap/data/actor5/cameras.yaml
 
 # Input image root and default output root.
 data:
-  images: /home/ymj/code/python/EasyMocap/actor5
-  output: /home/ymj/code/python/EasyMocap/lightmocap/outputs/actor5_scaled
+  images: /mnt/g/code/datasets/zju4dv/actor5/other-formats/wu-4dgs/output_renamed
+  output: /home/ymj/code/python/LightMoCap/output
 
 # Body model selection.
 model:
   model_path: /home/ymj/code/python/EasyMocap/models/smplx
-  gender: neutral
+  gender: female
   ext: npz
   device: cuda
 
@@ -24,9 +24,18 @@ model:
 detector:
   type: rtmlib
   solution: wholebody
-  mode: balanced
+  mode: performance
   device: cuda
   backend: onnxruntime
+
+# Rendering defaults.
+render:
+  render_device: gpu
+  mesh_color: [83,83,100]
+  alpha: 1.0
+  edge_color: null
+  metallic_factor: 0.05
+  roughness_factor: 0.65
 
 # SMPL-X fitting schedule.
 # `loss_weights` is written out explicitly here for readability and easy tuning.

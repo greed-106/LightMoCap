@@ -13,6 +13,14 @@ data:
   images: ../CoreView_377
   output: ../outputs/lightmocap
 
+render:
+  render_device: gpu
+  mesh_color: [245, 245, 245]
+  alpha: 1.0
+  edge_color: null
+  metallic_factor: 0.05
+  roughness_factor: 0.65
+
 # Optional frame-range selection for future batched workflows.
 frame:
   start: 0

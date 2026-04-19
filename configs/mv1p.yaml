@@ -28,6 +28,14 @@ detector:
   device: cuda
   backend: onnxruntime
 
+render:
+  render_device: gpu
+  mesh_color: [83,83,100]
+  alpha: 1.0
+  edge_color: null
+  metallic_factor: 0.05
+  roughness_factor: 0.65
+
 # SMPL-X fitting schedule.
 fitting:
   maxiters: 15

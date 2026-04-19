@@ -37,17 +37,24 @@ explicit = true
 推荐安装顺序：
 
 ```bash
-cd /home/ymj/code/python/LightMoCap
+cd LightMocap
 uv venv .venv --python 3.12
 
-# `torch` 会自动从 PyTorch 官方 cu118 源解析，其余包仍可走镜像源
-UV_INDEX_URL="https://pypi.tuna.tsinghua.edu.cn/simple" uv sync --extra dev --extra detection
+# `torch` 会自动从 PyTorch 官方 cu118 源解析
+# 如果需要高质量 mesh 渲染，请额外安装 `viz` 依赖
+UV_INDEX_URL="https://pypi.tuna.tsinghua.edu.cn/simple" uv sync --extra dev --extra detection --extra viz
 ```
 
 如果不需要开发和检测相关额外依赖，可以直接执行：
 
 ```bash
 UV_INDEX_URL="https://pypi.tuna.tsinghua.edu.cn/simple" uv sync
+```
+
+如果只想补装渲染依赖：
+
+```bash
+UV_INDEX_URL="https://pypi.tuna.tsinghua.edu.cn/simple" uv sync --extra viz
 ```
 
 ## 输入数据格式
@@ -137,6 +144,14 @@ cameras:
 data:
   images: /home/ymj/code/python/EasyMocap/CoreView_377
   output: /home/ymj/code/python/EasyMocap/lightmocap/outputs
+
+render:
+  render_device: gpu
+  mesh_color: [245, 245, 245]
+  alpha: 1.0
+  edge_color: null
+  metallic_factor: 0.05
+  roughness_factor: 0.65
 ```
 
 CLI 会优先读取配置里的路径，不再要求用户重复传已经在 config 中声明过的相机和输出参数。
@@ -158,6 +173,7 @@ CLI 会优先读取配置里的路径，不再要求用户重复传已经在 con
 - `triangulate`
 - `fit`
 - `run`
+- `render`
 
 `CoreView` 专用评测与 benchmark 已移动到 `scripts/`，和主 CLI 分层：
 
@@ -317,6 +333,39 @@ demo_run/
 
 因此更推荐把多个阶段串到同一个 `--output` 根目录下，而不是为每个阶段单独造一套结构。
 
+渲染相关参数现在也可以直接写在配置文件的 `render:` 段里。
+默认推荐使用：
+
+- `render_device: gpu`
+- 白色不透明 mesh：`mesh_color: [245, 245, 245]`、`alpha: 1.0`
+- 无边线：`edge_color: null`
+
+### 对已保存结果单独渲染
+
+`render` 命令会直接读取 `<output>/smplx/<frame>.json` 中保存的 `SMPL-X` 参数，
+重新前向生成 mesh，再渲染回原图；不依赖已经保存的 `vertices/*.npy`。
+
+如果当前 `--output` 根目录下的 `smplx/` 只有一个 JSON 文件，可以省略 `--frame`；
+如果同一个 `smplx/` 目录下保存了多帧结果，则仍然需要显式传 `--frame`。
+
+下面的示例完全依赖配置文件里的 `render:` 参数，只显式指定输入输出：
+
+```bash
+uv run lmc render \
+  --config /home/ymj/code/python/LightMoCap/configs/actor5_scaled.yaml \
+  --output /home/ymj/code/python/LightMoCap/output/frame001
+```
+
+如果想在命令行里临时覆盖配置，也可以显式指定：
+
+```bash
+uv run lmc render \
+  --config /home/ymj/code/python/LightMoCap/configs/actor5_scaled.yaml \
+  --frame 1 \
+  --output /home/ymj/code/python/LightMoCap/output/frame001 \
+  --render-device cpu
+```
+
 ## CoreView 评测脚本
 
 如果需要跑 `CoreView_377` 专用评测，请直接使用 `scripts/`：
@@ -375,3 +424,16 @@ uv run pytest
 - 与 V1 三角化一致性
 - `SMPL-X NPZ` 加载与前向
 - 真实数据回归
+
+## 致谢
+
+感谢 [EasyMocap](https://github.com/zju3dv/EasyMocap)。
+`LightMocap` 以 `EasyMocap` 的工程目标、数据约定和多视图人体重建实践为重要参考，本项目也是围绕其第一阶段重构思路持续推进。
+
+同时感谢当前实现所依赖的核心开源库与项目：
+
+- [rtmlib](https://github.com/Tau-J/rtmlib): 提供当前默认的 2D whole-body 检测链路
+- [PyTorch](https://pytorch.org/): 提供 SMPL-X 拟合与张量计算基础
+- [OpenCV](https://opencv.org/): 提供图像读取、几何处理与相机相关基础能力
+- [ONNX Runtime](https://github.com/microsoft/onnxruntime): 提供 rtmlib 默认推理后端
+- [NumPy](https://numpy.org/): 提供数值数组、线性代数与数据交换基础
