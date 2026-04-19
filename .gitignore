@@ -4,6 +4,8 @@
 __pycache__/
 uv.lock
 outputs/
+output/
+data/
 .codex/
 .omc/
 .claude/

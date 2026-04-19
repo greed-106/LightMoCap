@@ -2,13 +2,17 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import cv2
 import numpy as np
 
 from lightmocap.data.camera import CameraSet
 from lightmocap.data.io import read_json, write_json
-from lightmocap.viz.render import render_mesh_overlay
+from lightmocap.viz.render import RenderOptions, render_mesh_overlay
+
+if TYPE_CHECKING:
+    from lightmocap.models.smplx import SMPLXLayer
 
 
 @dataclass(frozen=True)
@@ -91,6 +95,31 @@ def save_frame_result(
         np.save(layout.vertices / f"{frame_name}.npy", np.asarray(result["vertices"]))
 
 
+def load_frame_smplx_params(output_root: str | Path, frame: str | int) -> dict[str, np.ndarray]:
+    layout = output_layout(output_root)
+    frame_name = normalize_frame_name(frame)
+    payload = read_json(layout.smplx / f"{frame_name}.json")
+    params = payload.get("smplx_params")
+    if not isinstance(params, dict):
+        raise ValueError(f"Missing smplx_params in {layout.smplx / f'{frame_name}.json'}")
+    return {key: np.asarray(value, dtype=np.float32) for key, value in params.items()}
+
+
+def infer_single_saved_smplx_frame(output_root: str | Path) -> str:
+    layout = output_layout(output_root)
+    candidates = sorted(layout.smplx.glob("*.json"))
+    if not candidates:
+        raise FileNotFoundError(f"No saved SMPL-X params found under {layout.smplx}")
+    if len(candidates) > 1:
+        names = ", ".join(path.stem for path in candidates[:5])
+        suffix = "" if len(candidates) <= 5 else ", ..."
+        raise ValueError(
+            f"Multiple SMPL-X result files found under {layout.smplx}: {names}{suffix}. "
+            "Please specify --frame explicitly."
+        )
+    return candidates[0].stem
+
+
 def render_result_views(
     output_root: str | Path,
     frame: str | int,
@@ -99,6 +128,7 @@ def render_result_views(
     vertices: np.ndarray,
     faces: np.ndarray,
     max_views: int | None = None,
+    render_options: RenderOptions | None = None,
 ) -> list[str]:
     layout = output_layout(output_root)
     frame_name = normalize_frame_name(frame)
@@ -111,8 +141,31 @@ def render_result_views(
         image = cv2.imread(str(image_path))
         if image is None:
             raise FileNotFoundError(image_path)
-        overlay = render_mesh_overlay(image, vertices, faces, cameras[camera_name])
+        overlay = render_mesh_overlay(image, vertices, faces, cameras[camera_name], options=render_options)
         out_path = layout.renders / f"{camera_name}_{frame_name}.jpg"
         cv2.imwrite(str(out_path), overlay)
         rendered.append(str(out_path))
     return rendered
+
+
+def render_smplx_result_views(
+    output_root: str | Path,
+    frame: str | int,
+    image_paths: dict[str, Path],
+    cameras: CameraSet,
+    body_model: "SMPLXLayer",
+    smplx_params: dict[str, np.ndarray],
+    max_views: int | None = None,
+    render_options: RenderOptions | None = None,
+) -> list[str]:
+    vertices = body_model(return_verts=True, return_tensor=False, **smplx_params)
+    return render_result_views(
+        output_root,
+        frame,
+        image_paths,
+        cameras,
+        np.asarray(vertices[0]),
+        body_model.faces,
+        max_views=max_views,
+        render_options=render_options,
+    )

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import warnings
 
 import numpy as np
 
@@ -24,5 +25,11 @@ def resolve_smplx_model_path(model_root: str | Path, gender: str = "neutral") ->
 
 def load_smplx_npz(model_root: str | Path, gender: str = "neutral") -> dict[str, np.ndarray]:
     path = resolve_smplx_model_path(model_root, gender)
-    data = np.load(path, allow_pickle=True)
-    return {key: data[key] for key in data.files}
+    with warnings.catch_warnings():
+        warnings.filterwarnings(
+            "ignore",
+            message=r"dtype\(\): align should be passed as Python or NumPy boolean.*",
+            category=Warning,
+        )
+        with np.load(path, allow_pickle=True) as data:
+            return {key: data[key] for key in data.files}

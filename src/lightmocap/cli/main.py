@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Callable
 
@@ -13,13 +14,17 @@ from lightmocap.data.dataset import MultiViewImageSequence
 from lightmocap.data.io import read_json, write_json
 from lightmocap.detection.adapter import openpose_people_to_annotation
 from lightmocap.detection.rtmlib import RTMLibDetector
+from lightmocap.models import SMPLXLayer
 from lightmocap.pipeline.mocap import MoCapPipeline
+from lightmocap.viz import RenderOptions
 from lightmocap.workflow.frame import (
     build_frame_image_paths,
+    infer_single_saved_smplx_frame,
+    load_frame_smplx_params,
     load_multiview_annotations,
     normalize_frame_name,
     output_layout,
-    render_result_views,
+    render_smplx_result_views,
     save_frame_result,
     save_multiview_annotations,
 )
@@ -71,6 +76,118 @@ def _layout_summary(root: str | Path) -> dict[str, str]:
     }
 
 
+def _load_cameras(config: DictConfig) -> CameraSet:
+    if hasattr(config.cameras, "path"):
+        return CameraSet.from_yaml(config.cameras.path)
+    return CameraSet.from_yaml(config.cameras.intri, config.cameras.extri)
+
+
+def _load_body_model(config: DictConfig) -> SMPLXLayer:
+    model_cfg = getattr(config, "model", None)
+    if model_cfg is None:
+        raise RuntimeError("Rendering requires a `model` section in the config.")
+    detector_cfg = getattr(config, "detector", None)
+    return SMPLXLayer(
+        model_path=model_cfg.model_path,
+        gender=getattr(model_cfg, "gender", "neutral"),
+        device=getattr(model_cfg, "device", getattr(detector_cfg, "device", "cpu") if detector_cfg is not None else "cpu"),
+    )
+
+
+def _resolve_saved_render_frame(args: argparse.Namespace, output_root: Path) -> str:
+    if getattr(args, "frame", None) is not None:
+        return normalize_frame_name(args.frame)
+    return infer_single_saved_smplx_frame(output_root)
+
+
+def _parse_color(value: str | list[int] | tuple[int, int, int] | None) -> tuple[int, int, int] | None:
+    if value is None:
+        return None
+    if not isinstance(value, str) and isinstance(value, Sequence):
+        if len(value) != 3:
+            raise ValueError(f"Expected 3 color channels, got {value}")
+        return tuple(int(channel) for channel in value)
+    text = str(value).strip().lower()
+    if text in {"none", "null"}:
+        return None
+    if text.startswith("#"):
+        text = text[1:]
+        if len(text) != 6:
+            raise ValueError(f"Expected 6-digit hex color, got {value}")
+        return tuple(int(text[index : index + 2], 16) for index in range(0, 6, 2))
+    parts = [part.strip() for part in text.split(",")]
+    if len(parts) != 3:
+        raise ValueError(f"Expected color like `255,255,255` or `#ffffff`, got {value}")
+    return tuple(int(part) for part in parts)
+
+
+def _cfg_select(config: DictConfig | None, key: str):
+    return None if config is None else OmegaConf.select(config, key)
+
+
+def _resolve_render_options(
+    config: DictConfig,
+    args: argparse.Namespace,
+    *,
+    default_color: tuple[int, int, int],
+    default_alpha: float,
+    default_edge_color: tuple[int, int, int] | None,
+    default_render_device: str,
+) -> RenderOptions:
+    render_cfg = getattr(config, "render", None)
+
+    mesh_color_arg = getattr(args, "mesh_color", None)
+    if mesh_color_arg is None:
+        mesh_color_cfg = _cfg_select(render_cfg, "mesh_color")
+        color = _parse_color(mesh_color_cfg) if mesh_color_cfg is not None else default_color
+    else:
+        parsed_color = _parse_color(mesh_color_arg)
+        color = default_color if parsed_color is None else parsed_color
+
+    alpha = getattr(args, "alpha", None)
+    if alpha is None:
+        alpha = _cfg_select(render_cfg, "alpha")
+    if alpha is None:
+        alpha = default_alpha
+
+    edge_color_arg = getattr(args, "edge_color", None)
+    if edge_color_arg is None:
+        edge_color_cfg = _cfg_select(render_cfg, "edge_color")
+        edge_color = _parse_color(edge_color_cfg) if edge_color_cfg is not None else default_edge_color
+    else:
+        edge_color = _parse_color(edge_color_arg)
+
+    render_device = getattr(args, "render_device", None) or _cfg_select(render_cfg, "render_device") or default_render_device
+    metallic = getattr(args, "metallic", None)
+    if metallic is None:
+        metallic = _cfg_select(render_cfg, "metallic_factor")
+    if metallic is None:
+        metallic = 0.05
+    roughness = getattr(args, "roughness", None)
+    if roughness is None:
+        roughness = _cfg_select(render_cfg, "roughness_factor")
+    if roughness is None:
+        roughness = 0.65
+
+    return RenderOptions(
+        color=color,
+        alpha=float(alpha),
+        edge_color=edge_color,
+        render_device=str(render_device),
+        metallic_factor=float(metallic),
+        roughness_factor=float(roughness),
+    )
+
+
+def _add_render_style_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--render-device", choices=["auto", "gpu", "cpu"], help="pyrender 设备偏好；gpu 会优先设置 EGL，cpu 会优先设置 OSMesa")
+    parser.add_argument("--mesh-color", help="网格颜色，支持 `255,255,255` 或 `#ffffff`")
+    parser.add_argument("--alpha", type=float, help="网格透明度；1.0 表示完全不透明")
+    parser.add_argument("--edge-color", help="边线颜色，支持 `255,255,255`、`#ffffff` 或 `none`")
+    parser.add_argument("--metallic", type=float, help="pyrender 材质 metallic 因子")
+    parser.add_argument("--roughness", type=float, help="pyrender 材质 roughness 因子")
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="lmc")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -115,22 +232,28 @@ def _build_parser() -> argparse.ArgumentParser:
     fit.add_argument("--output", help="输出根目录；默认读取 config.data.output")
     fit.add_argument("--annots", help="annotation 根目录；默认使用 <output>/annots")
     fit.add_argument("--render-views", type=int, default=0, help="导出前多少个相机视角的渲染图；0 表示不导出")
+    _add_render_style_args(fit)
 
     run = subparsers.add_parser("run", help="Run detect -> triangulate -> fit for one synchronized multiview frame")
     run.add_argument("--config", required=True, help="LightMocap 配置文件路径")
     run.add_argument("--frame", required=True, help="要处理的帧编号；3 和 000003 等价")
     run.add_argument("--output", help="输出根目录；默认读取 config.data.output")
     run.add_argument("--render-views", type=int, default=0, help="导出前多少个相机视角的渲染图；0 表示不导出")
+    _add_render_style_args(run)
+
+    render = subparsers.add_parser("render", help="Render saved SMPL-X parameters onto the source images")
+    render.add_argument("--config", required=True, help="LightMocap 配置文件路径")
+    render.add_argument("--frame", help="要渲染的帧编号；不填时会在 `<output>/smplx` 中自动推断单个结果文件")
+    render.add_argument("--output", help="结果根目录；默认读取 config.data.output")
+    render.add_argument("--render-views", type=int, help="导出前多少个相机视角；不填则渲染全部")
+    _add_render_style_args(render)
 
     return parser
 
 
 def _cmd_validate(args: argparse.Namespace) -> int:
     config = _load_config(args.config)
-    if hasattr(config.cameras, "path"):
-        cameras = CameraSet.from_yaml(config.cameras.path)
-    else:
-        cameras = CameraSet.from_yaml(config.cameras.intri, config.cameras.extri)
+    cameras = _load_cameras(config)
     dataset = MultiViewImageSequence(config.data.images, cameras)
     return _dump_json(
         {
@@ -236,14 +359,23 @@ def _cmd_fit(args: argparse.Namespace) -> int:
     rendered: list[str] = []
     if args.render_views > 0:
         image_paths = build_frame_image_paths(pipeline.config.data.images, pipeline.camera.names, frame_name)
-        rendered = render_result_views(
+        render_options = _resolve_render_options(
+            config,
+            args,
+            default_color=(245, 245, 245),
+            default_alpha=1.0,
+            default_edge_color=None,
+            default_render_device="gpu",
+        )
+        rendered = render_smplx_result_views(
             output_root,
             frame_name,
             image_paths,
             pipeline.camera,
-            vertices[0],
-            pipeline.body_model.faces,
+            pipeline.body_model,
+            params,
             max_views=args.render_views,
+            render_options=render_options,
         )
     return _dump_json(
         {
@@ -269,20 +401,67 @@ def _cmd_run(args: argparse.Namespace) -> int:
     save_frame_result(output_root, frame_name, result)
     rendered: list[str] = []
     if args.render_views > 0:
-        rendered = render_result_views(
+        render_options = _resolve_render_options(
+            config,
+            args,
+            default_color=(245, 245, 245),
+            default_alpha=1.0,
+            default_edge_color=None,
+            default_render_device="gpu",
+        )
+        rendered = render_smplx_result_views(
             output_root,
             frame_name,
             image_paths,
             pipeline.camera,
-            result["vertices"][0],
-            pipeline.body_model.faces,
+            pipeline.body_model,
+            result["smplx_params"],
             max_views=args.render_views,
+            render_options=render_options,
         )
     return _dump_json(
         {
             "frame": frame_name,
             "output": str(output_root.resolve()),
             "output_layout": _layout_summary(output_root),
+            "render_files": rendered,
+        },
+        output=None,
+    )
+
+
+def _cmd_render(args: argparse.Namespace) -> int:
+    config = _load_config(args.config)
+    cameras = _load_cameras(config)
+    body_model = _load_body_model(config)
+    output_root = _output_root(config, args.output)
+    frame_name = _resolve_saved_render_frame(args, output_root)
+    image_paths = build_frame_image_paths(config.data.images, cameras.names, frame_name)
+    smplx_params = load_frame_smplx_params(output_root, frame_name)
+    render_options = _resolve_render_options(
+        config,
+        args,
+        default_color=(245, 245, 245),
+        default_alpha=1.0,
+        default_edge_color=None,
+        default_render_device="gpu",
+    )
+    rendered = render_smplx_result_views(
+        output_root,
+        frame_name,
+        image_paths,
+        cameras,
+        body_model,
+        smplx_params,
+        max_views=args.render_views,
+        render_options=render_options,
+    )
+    return _dump_json(
+        {
+            "frame": frame_name,
+            "output": str(output_root.resolve()),
+            "output_layout": _layout_summary(output_root),
+            "render_device": render_options.render_device,
             "render_files": rendered,
         },
         output=None,
@@ -298,6 +477,7 @@ COMMANDS: dict[str, Callable[[argparse.Namespace], int]] = {
     "triangulate": _cmd_triangulate,
     "fit": _cmd_fit,
     "run": _cmd_run,
+    "render": _cmd_render,
 }
 
 

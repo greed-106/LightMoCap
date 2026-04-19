@@ -1,9 +1,22 @@
 from __future__ import annotations
 
+import os
+from dataclasses import dataclass
+
 import cv2
 import numpy as np
 
 from lightmocap.data.camera import PinholeCamera
+
+
+@dataclass(frozen=True)
+class RenderOptions:
+    color: tuple[int, int, int] = (60, 200, 80)
+    alpha: float = 0.55
+    edge_color: tuple[int, int, int] | None = (30, 30, 30)
+    render_device: str = "auto"
+    metallic_factor: float = 0.05
+    roughness_factor: float = 0.65
 
 
 def _world_to_camera(vertices: np.ndarray, camera: PinholeCamera) -> np.ndarray:
@@ -14,6 +27,89 @@ def _project_camera_points(camera_points: np.ndarray, K: np.ndarray) -> np.ndarr
     projected = camera_points @ K.T
     projected[:, :2] /= projected[:, 2:3]
     return projected[:, :2]
+
+
+def _normalize_color(color: tuple[int, int, int], alpha: float = 1.0) -> tuple[float, float, float, float]:
+    return tuple(channel / 255.0 for channel in color) + (float(alpha),)
+
+
+def _set_pyopengl_platform(render_device: str) -> None:
+    if "PYOPENGL_PLATFORM" in os.environ:
+        return
+    if render_device == "gpu":
+        os.environ["PYOPENGL_PLATFORM"] = "egl"
+    elif render_device == "cpu":
+        os.environ["PYOPENGL_PLATFORM"] = "osmesa"
+
+
+def _pyrender_camera_pose(camera: PinholeCamera) -> np.ndarray:
+    pose = np.eye(4, dtype=np.float32)
+    pose[:3, :3] = camera.R.T
+    pose[:3, 3] = (-camera.R.T @ camera.T).reshape(3)
+    opencv_to_opengl = np.diag([1.0, -1.0, -1.0, 1.0]).astype(np.float32)
+    return pose @ opencv_to_opengl
+
+
+def _render_with_pyrender(
+    image: np.ndarray,
+    vertices: np.ndarray,
+    faces: np.ndarray,
+    camera: PinholeCamera,
+    options: RenderOptions,
+) -> np.ndarray:
+    _set_pyopengl_platform(options.render_device)
+    try:
+        import pyrender
+        import trimesh
+    except ImportError as exc:
+        raise RuntimeError(
+            "pyrender backend requires the `viz` extras. Run `uv sync --extra viz`."
+        ) from exc
+
+    height, width = image.shape[:2]
+    scene = pyrender.Scene(
+        bg_color=np.array([0.0, 0.0, 0.0, 0.0], dtype=np.float32),
+        ambient_light=np.array([0.12, 0.12, 0.12, 1.0], dtype=np.float32),
+    )
+    material = pyrender.MetallicRoughnessMaterial(
+        baseColorFactor=_normalize_color(options.color, options.alpha),
+        metallicFactor=float(options.metallic_factor),
+        roughnessFactor=float(options.roughness_factor),
+        alphaMode="OPAQUE" if options.alpha >= 0.999 else "BLEND",
+        doubleSided=True,
+    )
+    mesh = trimesh.Trimesh(vertices=vertices, faces=faces, process=False)
+    scene.add(pyrender.Mesh.from_trimesh(mesh, material=material, smooth=True))
+    scene.add(
+        pyrender.IntrinsicsCamera(
+            fx=float(camera.K[0, 0]),
+            fy=float(camera.K[1, 1]),
+            cx=float(camera.K[0, 2]),
+            cy=float(camera.K[1, 2]),
+        ),
+        pose=_pyrender_camera_pose(camera),
+    )
+
+    camera_pose = _pyrender_camera_pose(camera)
+    light = pyrender.DirectionalLight(color=np.ones(3, dtype=np.float32), intensity=4.5)
+    scene.add(light, pose=camera_pose)
+    fill_pose = camera_pose.copy()
+    fill_pose[:3, 3] += np.array([0.6, 0.4, 0.2], dtype=np.float32)
+    scene.add(pyrender.DirectionalLight(color=np.ones(3, dtype=np.float32), intensity=2.0), pose=fill_pose)
+    rim_pose = camera_pose.copy()
+    rim_pose[:3, 3] += np.array([-0.6, 0.5, -0.2], dtype=np.float32)
+    scene.add(pyrender.DirectionalLight(color=np.ones(3, dtype=np.float32), intensity=1.5), pose=rim_pose)
+
+    renderer = pyrender.OffscreenRenderer(viewport_width=width, viewport_height=height)
+    try:
+        color_rgba, _ = renderer.render(scene, flags=pyrender.RenderFlags.RGBA)
+    finally:
+        renderer.delete()
+
+    render_bgr = color_rgba[..., :3][:, :, ::-1].astype(np.float32)
+    alpha = (color_rgba[..., 3:4].astype(np.float32) / 255.0).clip(0.0, 1.0)
+    output = image.astype(np.float32) * (1.0 - alpha) + render_bgr * alpha
+    return np.clip(np.round(output), 0, 255).astype(np.uint8)
 
 
 def render_mesh_overlay_from_camera(
@@ -57,12 +153,13 @@ def render_mesh_overlay(
     vertices: np.ndarray,
     faces: np.ndarray,
     camera: PinholeCamera,
+    options: RenderOptions | None = None,
     color: tuple[int, int, int] = (60, 200, 80),
     alpha: float = 0.55,
     edge_color: tuple[int, int, int] | None = (30, 30, 30),
 ) -> np.ndarray:
-    camera_points = _world_to_camera(vertices, camera)
-    return render_mesh_overlay_from_camera(image, camera_points, faces, camera.K, color=color, alpha=alpha, edge_color=edge_color)
+    options = options or RenderOptions(color=color, alpha=alpha, edge_color=edge_color)
+    return _render_with_pyrender(image, vertices, faces, camera, options)
 
 
 def make_panel(images: list[np.ndarray], labels: list[str], bg_color: tuple[int, int, int] = (255, 255, 255)) -> np.ndarray:
