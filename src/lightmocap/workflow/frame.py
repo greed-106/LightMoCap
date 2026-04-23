@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING
 
 import cv2
 import numpy as np
+import torch
 
 from lightmocap.data.camera import CameraSet
 from lightmocap.data.io import read_json, write_json
@@ -21,7 +22,6 @@ class FrameOutputLayout:
     annots: Path
     keypoints3d: Path
     smplx: Path
-    vertices: Path
     renders: Path
 
 
@@ -32,7 +32,6 @@ def output_layout(root: str | Path) -> FrameOutputLayout:
         annots=root_path / "annots",
         keypoints3d=root_path / "keypoints3d",
         smplx=root_path / "smplx",
-        vertices=root_path / "vertices",
         renders=root_path / "renders",
     )
 
@@ -74,25 +73,27 @@ def load_multiview_annotations(annotation_root: str | Path, camera_names: list[s
     return {camera_name: read_json(annotation_root / camera_name / f"{frame_name}.json") for camera_name in camera_names}
 
 
+def _as_numpy(value: object) -> np.ndarray:
+    if isinstance(value, torch.Tensor):
+        return value.detach().cpu().numpy()
+    return np.asarray(value)
+
+
 def save_frame_result(
     output_root: str | Path,
     frame: str | int,
     result: dict[str, object],
-    save_vertices: bool = True,
 ) -> None:
     layout = output_layout(output_root)
     frame_name = normalize_frame_name(frame)
     write_json(
         layout.keypoints3d / f"{frame_name}.json",
-        {"frame": frame_name, "keypoints3d": np.asarray(result["keypoints3d"]).tolist()},
+        {"frame": frame_name, "keypoints3d": _as_numpy(result["keypoints3d"]).tolist()},
     )
     write_json(
         layout.smplx / f"{frame_name}.json",
-        {"frame": frame_name, "smplx_params": {key: np.asarray(value).tolist() for key, value in result["smplx_params"].items()}},
+        {"frame": frame_name, "smplx_params": {key: _as_numpy(value).tolist() for key, value in result["smplx_params"].items()}},
     )
-    if save_vertices and result.get("vertices") is not None:
-        layout.vertices.mkdir(parents=True, exist_ok=True)
-        np.save(layout.vertices / f"{frame_name}.npy", np.asarray(result["vertices"]))
 
 
 def load_frame_smplx_params(output_root: str | Path, frame: str | int) -> dict[str, np.ndarray]:
@@ -127,6 +128,7 @@ def render_result_views(
     cameras: CameraSet,
     vertices: np.ndarray,
     faces: np.ndarray,
+    images: dict[str, np.ndarray] | None = None,
     max_views: int | None = None,
     render_options: RenderOptions | None = None,
 ) -> list[str]:
@@ -138,9 +140,12 @@ def render_result_views(
     if max_views is not None:
         camera_items = camera_items[:max_views]
     for camera_name, image_path in camera_items:
-        image = cv2.imread(str(image_path))
-        if image is None:
-            raise FileNotFoundError(image_path)
+        if images is not None and camera_name in images:
+            image = images[camera_name]
+        else:
+            image = cv2.imread(str(image_path))
+            if image is None:
+                raise FileNotFoundError(image_path)
         overlay = render_mesh_overlay(image, vertices, faces, cameras[camera_name], options=render_options)
         out_path = layout.renders / f"{camera_name}_{frame_name}.jpg"
         cv2.imwrite(str(out_path), overlay)
@@ -154,18 +159,23 @@ def render_smplx_result_views(
     image_paths: dict[str, Path],
     cameras: CameraSet,
     body_model: "SMPLXLayer",
-    smplx_params: dict[str, np.ndarray],
+    smplx_params: dict[str, np.ndarray | torch.Tensor],
+    images: dict[str, np.ndarray] | None = None,
     max_views: int | None = None,
     render_options: RenderOptions | None = None,
 ) -> list[str]:
     vertices = body_model(return_verts=True, return_tensor=False, **smplx_params)
+    vertices = np.asarray(vertices)
+    if vertices.ndim == 3:
+        vertices = vertices[0]
     return render_result_views(
         output_root,
         frame,
         image_paths,
         cameras,
-        np.asarray(vertices[0]),
+        vertices,
         body_model.faces,
+        images=images,
         max_views=max_views,
         render_options=render_options,
     )

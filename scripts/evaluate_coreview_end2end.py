@@ -6,6 +6,7 @@ from pathlib import Path
 
 import cv2
 import numpy as np
+import torch
 from omegaconf import OmegaConf
 
 from lightmocap.core.camera.undistort import Undistort
@@ -131,6 +132,12 @@ def _reprojection_metrics(
     return metrics
 
 
+def _to_numpy(value: np.ndarray | torch.Tensor) -> np.ndarray:
+    if isinstance(value, torch.Tensor):
+        return value.detach().cpu().numpy()
+    return np.asarray(value)
+
+
 def _staged_compare(pipeline: MoCapPipeline, images: dict[str, str], frame_name: str) -> tuple[dict[str, object], dict[str, dict], dict[str, float]]:
     staged_annotations = {}
     for camera_name, image_path in images.items():
@@ -141,18 +148,21 @@ def _staged_compare(pipeline: MoCapPipeline, images: dict[str, str], frame_name:
     staged_params = pipeline.fit_keypoints3d(staged_k3d, annotations=staged_annotations, camera_names=camera_names, mode=pipeline.detector.annotation_mode)
     staged_vertices = pipeline.body_model(return_verts=True, return_tensor=False, **staged_params)
     end2end = pipeline.process_frame(images, frame_id=int(frame_name))
+    end2end["smplx_params"] = {key: _to_numpy(value) for key, value in end2end["smplx_params"].items()}
+    end2end_vertices = pipeline.body_model(return_verts=True, return_tensor=False, **end2end["smplx_params"])
     diffs = {
         "annotation_body_max_abs_diff": 0.0,
         "triangulation_max_abs_diff": float(np.max(np.abs(end2end["keypoints3d"] - staged_k3d))),
         "poses_max_abs_diff": float(np.max(np.abs(end2end["smplx_params"]["poses"] - staged_params["poses"]))),
         "Rh_max_abs_diff": float(np.max(np.abs(end2end["smplx_params"]["Rh"] - staged_params["Rh"]))),
         "Th_max_abs_diff": float(np.max(np.abs(end2end["smplx_params"]["Th"] - staged_params["Th"]))),
-        "vertices_max_abs_diff": float(np.max(np.abs(end2end["vertices"] - staged_vertices))),
+        "vertices_max_abs_diff": float(np.max(np.abs(end2end_vertices - staged_vertices))),
     }
     for camera_name in images:
         end_body = np.asarray(end2end["annotations"][camera_name]["annots"][0]["keypoints"], dtype=np.float32)
         staged_body = np.asarray(staged_annotations[camera_name]["annots"][0]["keypoints"], dtype=np.float32)
         diffs["annotation_body_max_abs_diff"] = max(diffs["annotation_body_max_abs_diff"], float(np.max(np.abs(end_body - staged_body))))
+    end2end["vertices"] = end2end_vertices
     return end2end, staged_annotations, diffs
 
 
@@ -282,7 +292,7 @@ def evaluate_coreview_end2end(
         "frame": frame,
         "camera_names": cameras.names,
         "keypoints3d": end2end["keypoints3d"].tolist(),
-        "smplx_params": {key: value.tolist() for key, value in end2end["smplx_params"].items()},
+        "smplx_params": {key: _to_numpy(value).tolist() for key, value in end2end["smplx_params"].items()},
     }
 
     summary_path = output_dir / f"summary_{frame}.json"

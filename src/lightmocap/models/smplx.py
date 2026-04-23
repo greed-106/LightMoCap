@@ -333,9 +333,19 @@ class SMPLXLayer(nn.Module):
         keypoint_mode: str = "body25",
         only_shape: bool = False,
         pose2rot: bool = True,
+        validated: bool = False,
         **kwargs,
     ) -> torch.Tensor | np.ndarray:
-        params = self.check_params({"poses": poses, "shapes": shapes, "Rh": Rh, "Th": Th, "expression": expression})
+        if validated:
+            params = {
+                "poses": poses,
+                "shapes": shapes,
+                "Rh": Rh,
+                "Th": Th,
+                "expression": expression,
+            }
+        else:
+            params = self.check_params({"poses": poses, "shapes": shapes, "Rh": Rh, "Th": Th, "expression": expression})
         poses_t = params["poses"]
         shapes_t = params["shapes"]
         Rh_t = params["Rh"]
@@ -347,6 +357,7 @@ class SMPLXLayer(nn.Module):
             poses_t = self.extend_pose(poses_t)
         rot = batch_rodrigues(Rh_t) if Rh_t.ndim == 2 else Rh_t
         transl = Th_t.unsqueeze(1)
+        need_vertices = return_verts or keypoint_mode == "bodyhandface"
         vertices, joints = lbs(
             shapes_t,
             poses_t,
@@ -361,11 +372,15 @@ class SMPLXLayer(nn.Module):
             only_shape=only_shape,
             use_pose_blending=self.use_pose_blending,
             use_shape_blending=self.use_shape_blending,
+            compute_verts=need_vertices,
         )
-        vertices = torch.matmul(vertices, rot.transpose(1, 2)) + transl
+        if vertices is not None:
+            vertices = torch.matmul(vertices, rot.transpose(1, 2)) + transl
         joints = torch.matmul(joints, rot.transpose(1, 2)) + transl
         output: torch.Tensor
         if return_verts:
+            if vertices is None:
+                raise RuntimeError("Vertices were not computed")
             output = vertices
         elif return_smpl_joints:
             output = joints
@@ -373,6 +388,8 @@ class SMPLXLayer(nn.Module):
             if keypoint_mode == "body25":
                 output = self._native_joints_to_body25(joints)
             elif keypoint_mode == "bodyhandface":
+                if vertices is None:
+                    raise RuntimeError("Vertices are required for bodyhandface keypoints")
                 output = self.bodyhandface_keypoints(joints, vertices)
             else:
                 raise ValueError(f"Unsupported keypoint mode: {keypoint_mode}")

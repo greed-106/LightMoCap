@@ -11,7 +11,7 @@ cameras:
 # Input image root and default output root.
 data:
   images: /mnt/g/code/datasets/zju4dv/actor5/other-formats/wu-4dgs/output_renamed
-  output: /home/ymj/code/python/LightMoCap/output
+  output: /home/ymj/code/python/LightMoCap/output-test-actor5
 
 # Body model selection.
 model:
@@ -42,15 +42,26 @@ render:
 fitting:
   maxiters: 15
   shape_maxiters: 5
+  lbfgs_inner_max_iter: 8
   enable_k2d_refine: true
+  k3d_robust_sigma: 0.05
   stages:
     - name: shape
+    - name: torso
+      maxiters: 30
+      shoulder_weight: 5.0
+      hip_weight: 5.0
+      initialize: true
     - name: pose
+      maxiters: 15
+    - name: pose2d
+      maxiters: 15
   loss_weights:
     k2d: 0.0001
     k3d: 1.0
     k3d_hand: 5.0
     k3d_face: 2.0
+    joint_prior: 0.1
     reg_poses: 0.001
     reg_poses_zero: 0.01
     reg_hand: 0.0001

@@ -87,7 +87,8 @@ def lbs(
     use_shape_blending: bool = True,
     use_pose_blending: bool = True,
     J_shaped: torch.Tensor | None = None,
-) -> tuple[torch.Tensor, torch.Tensor]:
+    compute_verts: bool = True,
+) -> tuple[torch.Tensor | None, torch.Tensor]:
     batch_size = max(betas.shape[0], pose.shape[0])
     device = betas.device
     if use_shape_blending:
@@ -112,6 +113,8 @@ def lbs(
     else:
         v_posed = v_shaped
     J_transformed, A = batch_rigid_transform(rot_mats, J, parents, dtype=dtype)
+    if not compute_verts:
+        return None, J_transformed
     W = lbs_weights.unsqueeze(0).expand(batch_size, -1, -1)
     num_joints = J_regressor.shape[0]
     T = torch.matmul(W, A.view(batch_size, num_joints, 16)).view(batch_size, -1, 4, 4)

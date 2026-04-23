@@ -40,7 +40,17 @@ render:
 fitting:
   maxiters: 15
   shape_maxiters: 5
+  lbfgs_inner_max_iter: 8
   enable_k2d_refine: true
+  k3d_robust_sigma: 0.05
   stages:
     - name: shape
+    - name: torso
+      maxiters: 30
+      shoulder_weight: 5.0
+      hip_weight: 5.0
+      initialize: true
     - name: pose
+      maxiters: 15
+    - name: pose2d
+      maxiters: 15

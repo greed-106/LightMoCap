@@ -270,7 +270,6 @@ uv run lmc fit \
 demo_fit/
 ├── keypoints3d/000003.json
 ├── smplx/000003.json
-├── vertices/000003.npy
 └── renders/
     ├── Camera_B1_000003.jpg
     ├── Camera_B2_000003.jpg
@@ -292,7 +291,7 @@ uv run lmc run \
 1. 多视图 2D 检测
 2. 多视图三角化
 3. SMPL-X 拟合
-4. 导出参数、顶点和叠加渲染图
+4. 导出参数和叠加渲染图
 
 输出结构：
 
@@ -304,7 +303,6 @@ demo_run/
 │   └── ...
 ├── keypoints3d/000003.json
 ├── smplx/000003.json
-├── vertices/000003.npy
 └── renders/
     ├── Camera_B1_000003.jpg
     ├── Camera_B2_000003.jpg
@@ -320,7 +318,6 @@ demo_run/
 ├── annots/
 ├── keypoints3d/
 ├── smplx/
-├── vertices/
 └── renders/
 ```
 
@@ -328,7 +325,7 @@ demo_run/
 
 - `detect`：写 `annots/`
 - `triangulate`：读 `annots/`，写 `keypoints3d/`
-- `fit`：读 `annots/`，写 `keypoints3d/`、`smplx/`、`vertices/`、`renders/`
+- `fit`：读 `annots/`，写 `keypoints3d/`、`smplx/`、`renders/`
 - `run`：写完整布局
 
 因此更推荐把多个阶段串到同一个 `--output` 根目录下，而不是为每个阶段单独造一套结构。
@@ -343,7 +340,7 @@ demo_run/
 ### 对已保存结果单独渲染
 
 `render` 命令会直接读取 `<output>/smplx/<frame>.json` 中保存的 `SMPL-X` 参数，
-重新前向生成 mesh，再渲染回原图；不依赖已经保存的 `vertices/*.npy`。
+按需重新前向生成 mesh，再渲染回原图。
 
 如果当前 `--output` 根目录下的 `smplx/` 只有一个 JSON 文件，可以省略 `--frame`；
 如果同一个 `smplx/` 目录下保存了多帧结果，则仍然需要显式传 `--frame`。
@@ -398,7 +395,7 @@ result = pipeline.process_frame({
 })
 
 print(result["keypoints3d"].shape)
-print(result["vertices"].shape)
+print(result["smplx_params"]["poses"].shape)
 ```
 
 ## 当前局限

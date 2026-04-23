@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import numpy as np
 import torch
+import torch.nn.functional as F
 
 from lightmocap.data.skeleton import BODY25_SIZE, FACE_SIZE, HAND21_SIZE
 from lightmocap.models.lbs import batch_rodrigues
@@ -15,16 +16,32 @@ def gmof(squared_residual: torch.Tensor, sigma_squared: float) -> torch.Tensor:
 
 
 class LossKeypoints3D:
-    def __init__(self, keypoints3d: np.ndarray, device: torch.device) -> None:
+    def __init__(
+        self,
+        keypoints3d: np.ndarray,
+        device: torch.device,
+        robust: bool = True,
+        sigma_squared: float = 0.05**2,
+    ) -> None:
         keypoints3d = torch.tensor(keypoints3d, dtype=torch.float32, device=device)
         self.keypoints3d = keypoints3d[..., :3]
         self.conf = keypoints3d[..., 3:]
         self.n_frames = keypoints3d.shape[0]
+        self.robust = robust
+        self.sigma_squared = sigma_squared
 
-    def body(self, kpts_est: torch.Tensor, **kwargs) -> torch.Tensor:
+    def _reduce(self, diff: torch.Tensor) -> torch.Tensor:
+        squared = diff**2
+        if self.robust:
+            squared = gmof(squared, self.sigma_squared)
+        return torch.sum(squared) / self.n_frames
+
+    def body(self, kpts_est: torch.Tensor, joint_weights: torch.Tensor | None = None, **kwargs) -> torch.Tensor:
         n_joints = min(kpts_est.shape[1], self.keypoints3d.shape[1], BODY25_SIZE)
         diff = (kpts_est[:, :n_joints, :3] - self.keypoints3d[:, :n_joints, :3]) * self.conf[:, :n_joints]
-        return funcl2(diff) / self.n_frames
+        if joint_weights is not None:
+            diff = diff * joint_weights[:n_joints].view(1, n_joints, 1)
+        return self._reduce(diff)
 
     def hand(self, kpts_est: torch.Tensor, **kwargs) -> torch.Tensor:
         start = BODY25_SIZE
@@ -32,7 +49,7 @@ class LossKeypoints3D:
         if end <= start:
             return torch.zeros((), dtype=kpts_est.dtype, device=kpts_est.device)
         diff = (kpts_est[:, start:end, :3] - self.keypoints3d[:, start:end, :3]) * self.conf[:, start:end]
-        return funcl2(diff) / self.n_frames
+        return self._reduce(diff)
 
     def face(self, kpts_est: torch.Tensor, **kwargs) -> torch.Tensor:
         start = BODY25_SIZE + HAND21_SIZE * 2
@@ -40,7 +57,7 @@ class LossKeypoints3D:
         if end <= start:
             return torch.zeros((), dtype=kpts_est.dtype, device=kpts_est.device)
         diff = (kpts_est[:, start:end, :3] - self.keypoints3d[:, start:end, :3]) * self.conf[:, start:end]
-        return funcl2(diff) / self.n_frames
+        return self._reduce(diff)
 
 
 class LossKeypointsMV2D:
@@ -176,10 +193,81 @@ class LossRegShapes:
         return funcl2(shapes) / shapes.shape[0]
 
 
+class LossJointPrior:
+    """Lightweight anatomical prior inspired by XRMoCap's joint-angle limits.
+
+    The current pipeline optimizes compact SMPL-X poses where the first
+    3 values are the root body rotation and the next 63 values correspond
+    to the 21 body joints in the standard SMPL-X body chain.
+    """
+
+    def __init__(self) -> None:
+        self.knee_max = float(np.deg2rad(150.0))
+        self.elbow_max = float(np.deg2rad(150.0))
+        self.spine_limits = torch.from_numpy(
+            np.deg2rad(
+                np.array(
+                    [
+                        [35.0, 30.0, 40.0],
+                        [35.0, 25.0, 35.0],
+                        [35.0, 25.0, 35.0],
+                        [50.0, 40.0, 55.0],
+                    ],
+                    dtype=np.float32,
+                )
+            )
+        )
+
+    def __call__(self, poses: torch.Tensor, **kwargs) -> torch.Tensor:
+        if not isinstance(poses, torch.Tensor):
+            poses = torch.tensor(poses, dtype=torch.float32)
+        body_pose = poses[:, 3:66].reshape(-1, 21, 3)
+        device = body_pose.device
+        dtype = body_pose.dtype
+        limits = self.spine_limits.to(device=device, dtype=dtype)
+
+        loss = torch.zeros((), dtype=dtype, device=device)
+
+        # Knees are close to hinge joints: allow flexion, penalize hyperextension
+        # and large off-axis motion.
+        for joint_idx in (3, 4):
+            joint = body_pose[:, joint_idx]
+            loss = loss + funcl2(F.relu(-joint[:, 0]))
+            loss = loss + funcl2(F.relu(joint[:, 0] - self.knee_max))
+            loss = loss + 0.1 * funcl2(joint[:, 1:])
+
+        # Elbows should bend predominantly in one direction with little twist.
+        left_elbow = body_pose[:, 17]
+        right_elbow = body_pose[:, 18]
+        loss = loss + funcl2(F.relu(left_elbow[:, 1]))
+        loss = loss + funcl2(F.relu(-left_elbow[:, 1] - self.elbow_max))
+        loss = loss + 0.1 * funcl2(torch.stack([left_elbow[:, 0], left_elbow[:, 2]], dim=1))
+        loss = loss + funcl2(F.relu(-right_elbow[:, 1]))
+        loss = loss + funcl2(F.relu(right_elbow[:, 1] - self.elbow_max))
+        loss = loss + 0.1 * funcl2(torch.stack([right_elbow[:, 0], right_elbow[:, 2]], dim=1))
+
+        # Keep the spine and neck in a realistic range unless the data strongly
+        # supports a deviation.
+        for limit_idx, joint_idx in enumerate((2, 5, 8, 11)):
+            joint = body_pose[:, joint_idx]
+            excess = F.relu(joint.abs() - limits[limit_idx])
+            loss = loss + funcl2(excess)
+
+        return loss / poses.shape[0]
+
+
 class LossInit:
-    def __init__(self, params: dict[str, np.ndarray], device: torch.device) -> None:
-        self.poses = torch.tensor(params["poses"], dtype=torch.float32, device=device)
-        self.shapes = torch.tensor(params["shapes"], dtype=torch.float32, device=device)
+    def __init__(self, params: dict[str, np.ndarray | torch.Tensor], device: torch.device) -> None:
+        poses = params["poses"]
+        shapes = params["shapes"]
+        if isinstance(poses, torch.Tensor):
+            self.poses = poses.detach().to(device=device, dtype=torch.float32).clone()
+        else:
+            self.poses = torch.tensor(poses, dtype=torch.float32, device=device)
+        if isinstance(shapes, torch.Tensor):
+            self.shapes = shapes.detach().to(device=device, dtype=torch.float32).clone()
+        else:
+            self.shapes = torch.tensor(shapes, dtype=torch.float32, device=device)
 
     def init_poses(self, poses: torch.Tensor, **kwargs) -> torch.Tensor:
         return funcl2(poses - self.poses) / poses.shape[0]

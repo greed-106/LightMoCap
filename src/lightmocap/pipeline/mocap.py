@@ -4,6 +4,7 @@ from pathlib import Path
 
 import cv2
 import numpy as np
+import torch
 from omegaconf import DictConfig, OmegaConf
 
 from lightmocap.core.fitting import FittingConfig, SMPLXFittingPipeline
@@ -80,13 +81,19 @@ class MoCapPipeline:
             weight_loss = None
             if fit_cfg is not None and hasattr(fit_cfg, "loss_weights"):
                 weight_loss = OmegaConf.to_container(fit_cfg.loss_weights, resolve=True)
+            stages = None
+            if fit_cfg is not None and hasattr(fit_cfg, "stages"):
+                stages = OmegaConf.to_container(fit_cfg.stages, resolve=True)
             fitter = SMPLXFittingPipeline(
                 body_model,
                 FittingConfig(
                     device=str(body_model.device),
                     maxiters=getattr(fit_cfg, "maxiters", 20) if fit_cfg is not None else 20,
                     shape_maxiters=getattr(fit_cfg, "shape_maxiters", 10) if fit_cfg is not None else 10,
+                    lbfgs_inner_max_iter=getattr(fit_cfg, "lbfgs_inner_max_iter", 8) if fit_cfg is not None else 8,
                     enable_k2d_refine=getattr(fit_cfg, "enable_k2d_refine", True) if fit_cfg is not None else True,
+                    k3d_robust_sigma=getattr(fit_cfg, "k3d_robust_sigma", 0.05) if fit_cfg is not None else 0.05,
+                    stages=stages if stages is not None else FittingConfig().stages,
                     weight_loss=weight_loss if weight_loss is not None else FittingConfig().weight_loss,
                 ),
             )
@@ -167,6 +174,33 @@ class MoCapPipeline:
             projection_matrices=self.camera.projection_matrices(camera_names),
         )
 
+    def _fit_keypoints3d_tensor(
+        self,
+        keypoints3d: np.ndarray,
+        annotations: dict[str, dict] | None = None,
+        camera_names: list[str] | None = None,
+        mode: str | None = None,
+    ) -> dict[str, torch.Tensor]:
+        if self.fitter is None:
+            raise RuntimeError("Fitting pipeline is not initialized")
+        if keypoints3d.ndim == 2:
+            keypoints3d = keypoints3d[None]
+        if annotations is None:
+            return self.fitter.fit_tensor(keypoints3d)
+        camera_names = self.camera.names if camera_names is None else camera_names
+        mode = getattr(self.detector, "annotation_mode", "body25") if mode is None else mode
+        keypoints2d = np.stack(
+            [canonical_keypoints_from_annotation(annotations[camera_name], mode=mode).astype(np.float32) for camera_name in camera_names],
+            axis=0,
+        )
+        bboxes = self._bboxes_from_annotations(annotations, camera_names)
+        return self.fitter.fit_tensor(
+            keypoints3d,
+            keypoints2d=keypoints2d[None],
+            bboxes=bboxes[None],
+            projection_matrices=self.camera.projection_matrices(camera_names),
+        )
+
     def process_frame(self, images: dict[str, str | Path | np.ndarray], frame_id: int | None = None) -> dict[str, object]:
         """Run detect -> triangulate -> fit for a single synchronized frame."""
         if self.detector is None:
@@ -188,14 +222,11 @@ class MoCapPipeline:
         camera_names = list(images.keys())
         annotation_mode = getattr(self.detector, "annotation_mode", "body25")
         keypoints3d = self.triangulate_annotations(annotations, camera_names=camera_names, mode=annotation_mode)
-        smplx_params = self.fit_keypoints3d(keypoints3d, annotations=annotations, camera_names=camera_names, mode=annotation_mode)
-        vertices = None
-        if self.body_model is not None:
-            vertices = self.body_model(return_verts=True, return_tensor=False, **smplx_params)
+        smplx_params = self._fit_keypoints3d_tensor(keypoints3d, annotations=annotations, camera_names=camera_names, mode=annotation_mode)
         return {
             "frame_id": frame_id,
+            "images": loaded_images,
             "annotations": annotations,
             "keypoints3d": keypoints3d,
             "smplx_params": smplx_params,
-            "vertices": vertices,
         }

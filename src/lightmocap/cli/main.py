@@ -71,7 +71,6 @@ def _layout_summary(root: str | Path) -> dict[str, str]:
         "annots": str(layout.annots.resolve()),
         "keypoints3d": str(layout.keypoints3d.resolve()),
         "smplx": str(layout.smplx.resolve()),
-        "vertices": str(layout.vertices.resolve()),
         "renders": str(layout.renders.resolve()),
     }
 
@@ -347,13 +346,11 @@ def _cmd_fit(args: argparse.Namespace) -> int:
     annotations = load_multiview_annotations(annotation_root, pipeline.camera.names, frame_name)
     keypoints3d = pipeline.triangulate_annotations(annotations, camera_names=pipeline.camera.names, mode=pipeline.detector.annotation_mode)
     params = pipeline.fit_keypoints3d(keypoints3d, annotations=annotations, camera_names=pipeline.camera.names, mode=pipeline.detector.annotation_mode)
-    vertices = pipeline.body_model(return_verts=True, return_tensor=False, **params)
     result = {
         "frame_id": int(frame_name),
         "annotations": annotations,
         "keypoints3d": keypoints3d,
         "smplx_params": params,
-        "vertices": vertices,
     }
     save_frame_result(output_root, frame_name, result)
     rendered: list[str] = []
@@ -398,7 +395,6 @@ def _cmd_run(args: argparse.Namespace) -> int:
     image_paths = build_frame_image_paths(pipeline.config.data.images, pipeline.camera.names, frame_name)
     result = pipeline.process_frame(image_paths, frame_id=int(frame_name))
     save_multiview_annotations(result["annotations"], layout.annots, frame_name)
-    save_frame_result(output_root, frame_name, result)
     rendered: list[str] = []
     if args.render_views > 0:
         render_options = _resolve_render_options(
@@ -416,9 +412,11 @@ def _cmd_run(args: argparse.Namespace) -> int:
             pipeline.camera,
             pipeline.body_model,
             result["smplx_params"],
+            images=result.get("images"),
             max_views=args.render_views,
             render_options=render_options,
         )
+    save_frame_result(output_root, frame_name, result)
     return _dump_json(
         {
             "frame": frame_name,
