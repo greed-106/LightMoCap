@@ -24,6 +24,19 @@ def test_coreview_dataset_uses_natural_camera_order():
     assert sequence.camera_names[:5] == ["Camera_B1", "Camera_B2", "Camera_B3", "Camera_B4", "Camera_B5"]
 
 
+def test_multiview_sequence_discovers_png_frames(tmp_path):
+    for camera_name in ["Camera_B1", "Camera_B2"]:
+        camera_dir = tmp_path / camera_name
+        camera_dir.mkdir()
+        (camera_dir / "000001.png").touch()
+        (camera_dir / "000002.png").touch()
+
+    sequence = MultiViewImageSequence(tmp_path)
+
+    assert sequence.frame_names == ["000001", "000002"]
+    assert sequence.frame_paths(0)["Camera_B1"] == tmp_path / "Camera_B1" / "000001.png"
+
+
 def test_sanitize_keypoints_aligns_hand_roots_to_body_wrists():
     keypoints = np.zeros((1, 25 + 21 + 21 + 51, 4), dtype=np.float32)
     keypoints[0, 7] = [1.0, 2.0, 3.0, 0.9]

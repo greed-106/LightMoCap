@@ -12,6 +12,7 @@ from lightmocap.core.triangulation import triangulate_multiview_points
 from lightmocap.data.camera import CameraSet
 from lightmocap.data.dataset import MultiViewImageSequence
 from lightmocap.detection.adapter import canonical_keypoints_from_annotation
+from lightmocap.detection.masking import apply_image_mask, filter_annotation_by_mask, is_mask_usable, load_mask
 from lightmocap.detection.rtmlib import RTMLibDetector
 from lightmocap.modes.single import SingleMode
 from lightmocap.models.smplx import SMPLXLayer
@@ -58,7 +59,7 @@ class MoCapPipeline:
             camera = CameraSet.from_yaml(camera_cfg.path)
         else:
             camera = CameraSet.from_yaml(camera_cfg.intri, camera_cfg.extri)
-        dataset = MultiViewImageSequence(config.data.images, camera)
+        dataset = MultiViewImageSequence(config.data.images, camera, image_ext=OmegaConf.select(config, "data.image_ext"))
         detector = None
         detector_cfg = getattr(config, "detector", None)
         if detector_cfg is not None and detector_cfg.type == "rtmlib":
@@ -129,7 +130,15 @@ class MoCapPipeline:
             annot = annotations[camera_name]
             keypoints2d.append(canonical_keypoints_from_annotation(annot, mode=mode).astype(np.float64))
         keypoints2d = np.stack(keypoints2d, axis=0)
-        return triangulate_multiview_points(keypoints2d, self.camera, camera_names=camera_names)
+        min_view = int(OmegaConf.select(self.config, "triangulation.min_view") or 2) if self.config is not None else 2
+        max_reprojection_error = OmegaConf.select(self.config, "triangulation.max_reprojection_error") if self.config is not None else None
+        return triangulate_multiview_points(
+            keypoints2d,
+            self.camera,
+            camera_names=camera_names,
+            min_view=min_view,
+            max_reprojection_error=None if max_reprojection_error is None else float(max_reprojection_error),
+        )
 
     def _bboxes_from_annotations(self, annotations: dict[str, dict], camera_names: list[str]) -> np.ndarray:
         bboxes = []
@@ -201,7 +210,14 @@ class MoCapPipeline:
             projection_matrices=self.camera.projection_matrices(camera_names),
         )
 
-    def process_frame(self, images: dict[str, str | Path | np.ndarray], frame_id: int | None = None) -> dict[str, object]:
+    def process_frame(
+        self,
+        images: dict[str, str | Path | np.ndarray],
+        frame_id: int | None = None,
+        masks: dict[str, str | Path | np.ndarray] | None = None,
+        mask_threshold: int | float = 0,
+        min_mask_area_ratio: float = 0.0,
+    ) -> dict[str, object]:
         """Run detect -> triangulate -> fit for a single synchronized frame."""
         if self.detector is None:
             raise RuntimeError("Detector is not initialized")
@@ -217,8 +233,22 @@ class MoCapPipeline:
                 if image is None:
                     raise FileNotFoundError(image_path)
                 filename = str(image_path.name)
+            detect_image = image
+            mask = None
+            if masks is not None:
+                if camera_name not in masks:
+                    raise KeyError(f"Missing mask for camera {camera_name}")
+                mask_value = masks[camera_name]
+                mask = load_mask(mask_value) if isinstance(mask_value, (str, Path)) else np.asarray(mask_value)
+                if is_mask_usable(mask, threshold=mask_threshold, min_area_ratio=min_mask_area_ratio):
+                    detect_image = apply_image_mask(image, mask, threshold=mask_threshold)
+                else:
+                    mask = None
             loaded_images[camera_name] = image
-            annotations[camera_name] = self.detector.detect_annotation(image, filename)
+            annotation = self.detector.detect_annotation(detect_image, filename)
+            if mask is not None:
+                annotation = filter_annotation_by_mask(annotation, mask, threshold=mask_threshold, min_area_ratio=min_mask_area_ratio)
+            annotations[camera_name] = annotation
         camera_names = list(images.keys())
         annotation_mode = getattr(self.detector, "annotation_mode", "body25")
         keypoints3d = self.triangulate_annotations(annotations, camera_names=camera_names, mode=annotation_mode)

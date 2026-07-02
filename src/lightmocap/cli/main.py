@@ -13,12 +13,14 @@ from lightmocap.data.camera import CameraSet
 from lightmocap.data.dataset import MultiViewImageSequence
 from lightmocap.data.io import read_json, write_json
 from lightmocap.detection.adapter import openpose_people_to_annotation
+from lightmocap.detection.masking import apply_image_mask, filter_annotation_by_mask, is_mask_usable, load_mask
 from lightmocap.detection.rtmlib import RTMLibDetector
 from lightmocap.models import SMPLXLayer
 from lightmocap.pipeline.mocap import MoCapPipeline
 from lightmocap.viz import RenderOptions
 from lightmocap.workflow.frame import (
     build_frame_image_paths,
+    build_frame_mask_paths,
     infer_single_saved_smplx_frame,
     load_frame_smplx_params,
     load_multiview_annotations,
@@ -58,10 +60,62 @@ def _output_root(config: DictConfig, output: str | None) -> Path:
     return Path.cwd() / "outputs"
 
 
+def _image_ext(config: DictConfig) -> str | None:
+    configured = OmegaConf.select(config, "data.image_ext")
+    return None if configured is None else str(configured)
+
+
 def _annotation_root(args: argparse.Namespace, config: DictConfig) -> Path:
     if getattr(args, "annots", None):
         return Path(args.annots)
     return output_layout(_output_root(config, getattr(args, "output", None))).annots
+
+
+def _mask_root(args: argparse.Namespace, config: DictConfig) -> Path | None:
+    if getattr(args, "masks", None):
+        return Path(args.masks)
+    configured = OmegaConf.select(config, "data.masks")
+    return None if configured is None else Path(str(configured))
+
+
+def _mask_threshold(args: argparse.Namespace, config: DictConfig) -> int | float:
+    if getattr(args, "mask_threshold", None) is not None:
+        return args.mask_threshold
+    configured = OmegaConf.select(config, "data.mask_threshold")
+    return 0 if configured is None else configured
+
+
+def _min_mask_area_ratio(args: argparse.Namespace, config: DictConfig) -> float:
+    if getattr(args, "min_mask_area_ratio", None) is not None:
+        return float(args.min_mask_area_ratio)
+    configured = OmegaConf.select(config, "data.min_mask_area_ratio")
+    return 0.0 if configured is None else float(configured)
+
+
+def _mask_paths_for_images(config: DictConfig, args: argparse.Namespace, image_paths: dict[str, Path]) -> dict[str, Path] | None:
+    masks = _mask_root(args, config)
+    if masks is None:
+        return None
+    return build_frame_mask_paths(masks, config.data.images, image_paths)
+
+
+def _filter_annotations_with_masks(
+    annotations: dict[str, dict],
+    mask_paths: dict[str, Path] | None,
+    mask_threshold: int | float,
+    min_mask_area_ratio: float,
+) -> dict[str, dict]:
+    if mask_paths is None:
+        return annotations
+    return {
+        camera_name: filter_annotation_by_mask(
+            annotation,
+            load_mask(mask_paths[camera_name]),
+            threshold=mask_threshold,
+            min_area_ratio=min_mask_area_ratio,
+        )
+        for camera_name, annotation in annotations.items()
+    }
 
 
 def _layout_summary(root: str | Path) -> dict[str, str]:
@@ -187,6 +241,12 @@ def _add_render_style_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--roughness", type=float, help="pyrender 材质 roughness 因子")
 
 
+def _add_mask_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--masks", help="可选 mask 根目录；目录结构和文件命名必须与 data.images 完全一致")
+    parser.add_argument("--mask-threshold", type=float, help="mask 前景阈值；默认读取 config.data.mask_threshold，否则使用 0")
+    parser.add_argument("--min-mask-area-ratio", type=float, help="小于该前景面积比例的 mask 会被视为无效并跳过；默认 0")
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="lmc")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -218,12 +278,14 @@ def _build_parser() -> argparse.ArgumentParser:
     detect.add_argument("--config", required=True, help="LightMocap 配置文件路径")
     detect.add_argument("--frame", required=True, help="要处理的帧编号；3 和 000003 等价")
     detect.add_argument("--output", help="输出根目录；默认读取 config.data.output")
+    _add_mask_args(detect)
 
     triangulate = subparsers.add_parser("triangulate", help="Triangulate one frame from saved multiview annotations")
     triangulate.add_argument("--config", required=True, help="LightMocap 配置文件路径")
     triangulate.add_argument("--frame", required=True, help="要处理的帧编号；3 和 000003 等价")
     triangulate.add_argument("--output", help="输出根目录；默认读取 config.data.output")
     triangulate.add_argument("--annots", help="annotation 根目录；默认使用 <output>/annots")
+    _add_mask_args(triangulate)
 
     fit = subparsers.add_parser("fit", help="Fit SMPL-X for one frame from saved annotations")
     fit.add_argument("--config", required=True, help="LightMocap 配置文件路径")
@@ -231,6 +293,7 @@ def _build_parser() -> argparse.ArgumentParser:
     fit.add_argument("--output", help="输出根目录；默认读取 config.data.output")
     fit.add_argument("--annots", help="annotation 根目录；默认使用 <output>/annots")
     fit.add_argument("--render-views", type=int, default=0, help="导出前多少个相机视角的渲染图；0 表示不导出")
+    _add_mask_args(fit)
     _add_render_style_args(fit)
 
     run = subparsers.add_parser("run", help="Run detect -> triangulate -> fit for one synchronized multiview frame")
@@ -238,6 +301,7 @@ def _build_parser() -> argparse.ArgumentParser:
     run.add_argument("--frame", required=True, help="要处理的帧编号；3 和 000003 等价")
     run.add_argument("--output", help="输出根目录；默认读取 config.data.output")
     run.add_argument("--render-views", type=int, default=0, help="导出前多少个相机视角的渲染图；0 表示不导出")
+    _add_mask_args(run)
     _add_render_style_args(run)
 
     render = subparsers.add_parser("render", help="Render saved SMPL-X parameters onto the source images")
@@ -253,7 +317,7 @@ def _build_parser() -> argparse.ArgumentParser:
 def _cmd_validate(args: argparse.Namespace) -> int:
     config = _load_config(args.config)
     cameras = _load_cameras(config)
-    dataset = MultiViewImageSequence(config.data.images, cameras)
+    dataset = MultiViewImageSequence(config.data.images, cameras, image_ext=_image_ext(config))
     return _dump_json(
         {
             "mode": config.mode.type,
@@ -295,10 +359,24 @@ def _cmd_detect(args: argparse.Namespace) -> int:
     frame_name = normalize_frame_name(args.frame)
     output_root = _output_root(config, args.output)
     layout = output_layout(output_root)
-    image_paths = build_frame_image_paths(pipeline.config.data.images, pipeline.camera.names, frame_name)
+    image_paths = build_frame_image_paths(pipeline.config.data.images, pipeline.camera.names, frame_name, image_ext=_image_ext(config))
+    mask_paths = _mask_paths_for_images(config, args, image_paths)
+    mask_threshold = _mask_threshold(args, config)
+    min_mask_area_ratio = _min_mask_area_ratio(args, config)
     annotations = {}
     for camera_name, image_path in image_paths.items():
-        annotations[camera_name] = pipeline.detector.detect_annotation(_read_image(image_path), image_path.name)
+        image = _read_image(image_path)
+        mask = None
+        if mask_paths is not None:
+            mask = load_mask(mask_paths[camera_name])
+            if is_mask_usable(mask, threshold=mask_threshold, min_area_ratio=min_mask_area_ratio):
+                image = apply_image_mask(image, mask, threshold=mask_threshold)
+            else:
+                mask = None
+        annotation = pipeline.detector.detect_annotation(image, image_path.name)
+        if mask is not None:
+            annotation = filter_annotation_by_mask(annotation, mask, threshold=mask_threshold, min_area_ratio=min_mask_area_ratio)
+        annotations[camera_name] = annotation
     save_multiview_annotations(annotations, layout.annots, frame_name)
     return _dump_json(
         {
@@ -308,6 +386,7 @@ def _cmd_detect(args: argparse.Namespace) -> int:
             "output_layout": _layout_summary(output_root),
             "camera_names": pipeline.camera.names,
             "num_cameras": len(pipeline.camera.names),
+            "mask_root": None if _mask_root(args, config) is None else str(_mask_root(args, config).resolve()),
         },
         output=None,
     )
@@ -321,6 +400,11 @@ def _cmd_triangulate(args: argparse.Namespace) -> int:
     layout = output_layout(output_root)
     annotation_root = _annotation_root(args, config)
     annotations = load_multiview_annotations(annotation_root, pipeline.camera.names, frame_name)
+    image_paths = build_frame_image_paths(pipeline.config.data.images, pipeline.camera.names, frame_name, image_ext=_image_ext(config))
+    mask_paths = _mask_paths_for_images(config, args, image_paths)
+    annotations = _filter_annotations_with_masks(annotations, mask_paths, _mask_threshold(args, config), _min_mask_area_ratio(args, config))
+    if mask_paths is not None:
+        save_multiview_annotations(annotations, layout.annots, frame_name)
     keypoints3d = pipeline.triangulate_annotations(annotations, camera_names=pipeline.camera.names, mode=pipeline.detector.annotation_mode)
     output_path = layout.keypoints3d / f"{frame_name}.json"
     write_json(output_path, {"frame": frame_name, "keypoints3d": keypoints3d.tolist()})
@@ -332,6 +416,8 @@ def _cmd_triangulate(args: argparse.Namespace) -> int:
             "keypoints3d_path": str(output_path.resolve()),
             "output_layout": _layout_summary(output_root),
             "shape": list(keypoints3d.shape),
+            "mask_root": None if _mask_root(args, config) is None else str(_mask_root(args, config).resolve()),
+            "filtered_annotation_root": str(layout.annots.resolve()) if mask_paths is not None else None,
         },
         output=None,
     )
@@ -344,6 +430,11 @@ def _cmd_fit(args: argparse.Namespace) -> int:
     output_root = _output_root(config, args.output)
     annotation_root = _annotation_root(args, config)
     annotations = load_multiview_annotations(annotation_root, pipeline.camera.names, frame_name)
+    image_paths = build_frame_image_paths(pipeline.config.data.images, pipeline.camera.names, frame_name, image_ext=_image_ext(config))
+    mask_paths = _mask_paths_for_images(config, args, image_paths)
+    annotations = _filter_annotations_with_masks(annotations, mask_paths, _mask_threshold(args, config), _min_mask_area_ratio(args, config))
+    if mask_paths is not None:
+        save_multiview_annotations(annotations, output_layout(output_root).annots, frame_name)
     keypoints3d = pipeline.triangulate_annotations(annotations, camera_names=pipeline.camera.names, mode=pipeline.detector.annotation_mode)
     params = pipeline.fit_keypoints3d(keypoints3d, annotations=annotations, camera_names=pipeline.camera.names, mode=pipeline.detector.annotation_mode)
     result = {
@@ -355,7 +446,7 @@ def _cmd_fit(args: argparse.Namespace) -> int:
     save_frame_result(output_root, frame_name, result)
     rendered: list[str] = []
     if args.render_views > 0:
-        image_paths = build_frame_image_paths(pipeline.config.data.images, pipeline.camera.names, frame_name)
+        image_paths = build_frame_image_paths(pipeline.config.data.images, pipeline.camera.names, frame_name, image_ext=_image_ext(config))
         render_options = _resolve_render_options(
             config,
             args,
@@ -381,6 +472,8 @@ def _cmd_fit(args: argparse.Namespace) -> int:
             "annotation_root": str(annotation_root.resolve()),
             "output_layout": _layout_summary(output_root),
             "render_files": rendered,
+            "mask_root": None if _mask_root(args, config) is None else str(_mask_root(args, config).resolve()),
+            "filtered_annotation_root": str(output_layout(output_root).annots.resolve()) if mask_paths is not None else None,
         },
         output=None,
     )
@@ -392,8 +485,15 @@ def _cmd_run(args: argparse.Namespace) -> int:
     frame_name = normalize_frame_name(args.frame)
     output_root = _output_root(config, args.output)
     layout = output_layout(output_root)
-    image_paths = build_frame_image_paths(pipeline.config.data.images, pipeline.camera.names, frame_name)
-    result = pipeline.process_frame(image_paths, frame_id=int(frame_name))
+    image_paths = build_frame_image_paths(pipeline.config.data.images, pipeline.camera.names, frame_name, image_ext=_image_ext(config))
+    mask_paths = _mask_paths_for_images(config, args, image_paths)
+    result = pipeline.process_frame(
+        image_paths,
+        frame_id=int(frame_name),
+        masks=mask_paths,
+        mask_threshold=_mask_threshold(args, config),
+        min_mask_area_ratio=_min_mask_area_ratio(args, config),
+    )
     save_multiview_annotations(result["annotations"], layout.annots, frame_name)
     rendered: list[str] = []
     if args.render_views > 0:
@@ -423,6 +523,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
             "output": str(output_root.resolve()),
             "output_layout": _layout_summary(output_root),
             "render_files": rendered,
+            "mask_root": None if _mask_root(args, config) is None else str(_mask_root(args, config).resolve()),
         },
         output=None,
     )
@@ -434,7 +535,7 @@ def _cmd_render(args: argparse.Namespace) -> int:
     body_model = _load_body_model(config)
     output_root = _output_root(config, args.output)
     frame_name = _resolve_saved_render_frame(args, output_root)
-    image_paths = build_frame_image_paths(config.data.images, cameras.names, frame_name)
+    image_paths = build_frame_image_paths(config.data.images, cameras.names, frame_name, image_ext=_image_ext(config))
     smplx_params = load_frame_smplx_params(output_root, frame_name)
     render_options = _resolve_render_options(
         config,

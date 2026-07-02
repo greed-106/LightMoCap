@@ -11,6 +11,8 @@ cameras:
 # Multiview image root and default output root.
 data:
   images: ../CoreView_377
+  # Optional. When omitted, .jpg/.jpeg/.png are discovered automatically.
+  image_ext: null
   output: ../outputs/lightmocap
 
 render:

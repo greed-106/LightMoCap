@@ -10,6 +10,7 @@ import torch
 
 from lightmocap.data.camera import CameraSet
 from lightmocap.data.io import read_json, write_json
+from lightmocap.data.dataset import SUPPORTED_IMAGE_EXTS
 from lightmocap.viz.render import RenderOptions, render_mesh_overlay
 
 if TYPE_CHECKING:
@@ -43,21 +44,67 @@ def normalize_frame_name(frame: str | int) -> str:
     return frame.zfill(6) if frame.isdigit() and len(frame) < 6 else frame
 
 
-def build_frame_image_paths(image_root: str | Path, camera_names: list[str], frame: str | int, image_ext: str = ".jpg") -> dict[str, Path]:
+def _image_ext_candidates(image_ext: str | None = None) -> tuple[str, ...]:
+    if image_ext is None:
+        return SUPPORTED_IMAGE_EXTS
+    image_ext = str(image_ext).strip()
+    if not image_ext:
+        return SUPPORTED_IMAGE_EXTS
+    return (image_ext if image_ext.startswith(".") else f".{image_ext}",)
+
+
+def _frame_name_candidates(frame: str | int) -> tuple[str, ...]:
+    raw = str(frame)
+    candidates = [raw, normalize_frame_name(frame)]
+    if raw.isdigit():
+        value = int(raw)
+        candidates.extend([f"{value:03d}", f"{value:06d}"])
+    return tuple(dict.fromkeys(candidates))
+
+
+def build_frame_image_paths(image_root: str | Path, camera_names: list[str], frame: str | int, image_ext: str | None = None) -> dict[str, Path]:
     root = Path(image_root)
-    frame_name = normalize_frame_name(frame)
     image_paths: dict[str, Path] = {}
+    ext_candidates = _image_ext_candidates(image_ext)
+    frame_candidates = _frame_name_candidates(frame)
     for camera_name in camera_names:
-        direct = root / camera_name / f"{frame_name}{image_ext}"
-        if direct.exists():
-            image_paths[camera_name] = direct
+        camera_dir = root / camera_name
+        for frame_name in frame_candidates:
+            for ext in ext_candidates:
+                direct = camera_dir / f"{frame_name}{ext}"
+                if direct.exists():
+                    image_paths[camera_name] = direct
+                    break
+            if camera_name in image_paths:
+                break
+        if camera_name in image_paths:
             continue
-        candidates = sorted((root / camera_name).glob(f"*{image_ext}"))
+        candidates = []
+        for ext in ext_candidates:
+            candidates.extend(camera_dir.glob(f"*{ext}"))
+            candidates.extend(camera_dir.glob(f"*{ext.upper()}"))
+        candidates = sorted(candidates)
         if len(candidates) == 1:
             image_paths[camera_name] = candidates[0]
             continue
-        image_paths[camera_name] = direct
+        image_paths[camera_name] = camera_dir / f"{frame_candidates[0]}{ext_candidates[0]}"
     return image_paths
+
+
+def build_frame_mask_paths(mask_root: str | Path | None, image_root: str | Path, image_paths: dict[str, Path]) -> dict[str, Path]:
+    if mask_root is None:
+        return {}
+    root = Path(image_root)
+    mask_root_path = Path(mask_root)
+    mask_paths: dict[str, Path] = {}
+    for camera_name, image_path in image_paths.items():
+        image_path = Path(image_path)
+        try:
+            relative = image_path.relative_to(root)
+        except ValueError:
+            relative = image_path.resolve().relative_to(root.resolve())
+        mask_paths[camera_name] = mask_root_path / relative
+    return mask_paths
 
 
 def save_multiview_annotations(annotations: dict[str, dict], output_root: str | Path, frame: str | int) -> None:
